@@ -32,6 +32,7 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.channels.Pipe;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
@@ -42,6 +43,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -70,6 +72,8 @@ public class TransferTo {
 
     public static void main(String[] args) throws Exception {
         test(fileChannelInput(), fileChannelOutput());
+        test(fileChannelInput(), selectableChannelOutput());
+        test(fileChannelInput(), writableByteChannelOutput()); // Non-Selectable
         test(readableByteChannelInput(), defaultOutput());
     }
 
@@ -197,6 +201,52 @@ public class TransferTo {
                     }
                 });
                 return Channels.newOutputStream(fileChannel);
+            }
+        };
+    }
+
+    private static OutputStreamProvider selectableChannelOutput() throws IOException {
+        return new OutputStreamProvider() {
+            public OutputStream output(Consumer<Supplier<byte[]>> spy) throws Exception {
+                Pipe pipe = Pipe.open();
+                CountDownLatch cdl = new CountDownLatch(1);
+                AtomicReference<byte[]> bytes = new AtomicReference<>();
+                Thread reader = new Thread(() -> {
+                    try {
+                        InputStream is = Channels.newInputStream(pipe.source());
+                        bytes.set(is.readAllBytes());
+                    } catch (IOException e) {
+                        throw new AssertionError("Exception while asserting content", e);
+                    } finally {
+                        cdl.countDown();
+                    }
+                });
+                reader.start();
+                final OutputStream os = Channels.newOutputStream(pipe.sink());
+                spy.accept(() -> {
+                    try {
+                        System.out.println("CLOSING");
+                        os.close();
+                        System.out.println("WAITING");
+                        cdl.await();
+                        byte[] b = bytes.get();
+                        System.out.println("BYTES " + b.length);
+                        return b;
+                    } catch (IOException | InterruptedException e) {
+                        throw new AssertionError("Exception while asserting content", e);
+                    }
+                });
+                return os;
+            }
+        };
+    }
+
+    private static OutputStreamProvider writableByteChannelOutput() {
+        return new OutputStreamProvider() {
+            public OutputStream output(Consumer<Supplier<byte[]>> spy) throws Exception {
+                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                spy.accept(outputStream::toByteArray);
+                return Channels.newOutputStream(Channels.newChannel(outputStream));
             }
         };
     }
