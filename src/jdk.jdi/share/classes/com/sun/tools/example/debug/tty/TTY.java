@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,6 +44,21 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.io.*;
 
 public class TTY implements EventNotifier {
+    /**
+     * Commands that are repeatable on empty input.
+     */
+    protected static final Set<String> REPEATABLE = Set.of(
+        "up", "down", "step", "stepi", "next", "cont", "list", "pop", "reenter"
+    );
+
+    /**
+     * Commands that reset the default source line to be displayed by {@code list}.
+     */
+    protected static final Set<String> LIST_RESET = Set.of(
+        "run", "suspend", "resume", "up", "down", "kill", "interrupt", "threadgroup", "step", "stepi", "next", "cont",
+        "pop", "reenter"
+    );
+
     EventHandler handler = null;
 
     /**
@@ -58,6 +73,16 @@ public class TTY implements EventNotifier {
     private static final String progname = "jdb";
 
     private volatile boolean shuttingDown = false;
+
+    /**
+     * The number of the next source line to target for {@code list}, if any.
+     */
+    protected Integer nextListTarget = null;
+
+    /**
+     * Whether to repeat when the user enters an empty command.
+     */
+    protected boolean repeat = false;
 
     public void setShuttingDown(boolean s) {
        shuttingDown = s;
@@ -335,6 +360,7 @@ public class TTY implements EventNotifier {
         {"read",         "y",         "y"},
         {"redefine",     "n",         "n"},
         {"reenter",      "n",         "n"},
+        {"repeat",       "y",         "y"},
         {"resume",       "n",         "n"},
         {"run",          "y",         "n"},
         {"save",         "n",         "n"},
@@ -408,211 +434,219 @@ public class TTY implements EventNotifier {
     };
 
 
-    void executeCommand(StringTokenizer t) {
-        String cmd = t.nextToken().toLowerCase();
+    /**
+     * @return the name (first token) of the command processed
+     */
+    String executeCommand(StringTokenizer t) {
+        String name = t.nextToken().toLowerCase();
+
         // Normally, prompt for the next command after this one is done
         boolean showPrompt = true;
-
 
         /*
          * Anything starting with # is discarded as a no-op or 'comment'.
          */
-        if (!cmd.startsWith("#")) {
+        if (!name.startsWith("#")) {
             /*
-             * Next check for an integer repetition prefix.  If found,
-             * recursively execute cmd that number of times.
+             * Next check for an integer repetition prefix.
              */
-            if (Character.isDigit(cmd.charAt(0)) && t.hasMoreTokens()) {
+            boolean valid = true;
+            int reps = 1;
+            while (Character.isDigit(name.charAt(0)) && t.hasMoreTokens()) {
                 try {
-                    int repeat = Integer.parseInt(cmd);
-                    String subcom = t.nextToken("");
-                    while (repeat-- > 0) {
-                        executeCommand(new StringTokenizer(subcom));
-                        showPrompt = false; // Bypass the printPrompt() below.
-                    }
+                    reps *= Integer.parseInt(name);  // nested repeats are possible
                 } catch (NumberFormatException exc) {
-                    MessageOutput.println("Unrecognized command.  Try help...", cmd);
+                    valid = false;
+                    MessageOutput.println("Unrecognized command.  Try help...", name);
+                    break;
                 }
-            } else {
-                int commandNumber = isCommand(cmd);
-                /*
-                 * Check for an unknown command
-                 */
-                if (commandNumber < 0) {
-                    MessageOutput.println("Unrecognized command.  Try help...", cmd);
-                } else if (!Env.connection().isOpen() && !isDisconnectCmd(commandNumber)) {
-                    MessageOutput.println("Command not valid until the VM is started with the run command",
-                                          cmd);
-                } else if (Env.connection().isOpen() && !Env.vm().canBeModified() &&
-                           !isReadOnlyCmd(commandNumber)) {
-                    MessageOutput.println("Command is not supported on a read-only VM connection",
-                                          cmd);
-                } else {
-
-                    Commands evaluator = new Commands();
-                    try {
-                        if (cmd.equals("print")) {
-                            evaluator.commandPrint(t, false);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("eval")) {
-                            evaluator.commandPrint(t, false);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("set")) {
-                            evaluator.commandSet(t);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("dump")) {
-                            evaluator.commandPrint(t, true);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("locals")) {
-                            evaluator.commandLocals();
-                        } else if (cmd.equals("classes")) {
-                            evaluator.commandClasses();
-                        } else if (cmd.equals("class")) {
-                            evaluator.commandClass(t);
-                        } else if (cmd.equals("connectors")) {
-                            evaluator.commandConnectors(Bootstrap.virtualMachineManager());
-                        } else if (cmd.equals("methods")) {
-                            evaluator.commandMethods(t);
-                        } else if (cmd.equals("fields")) {
-                            evaluator.commandFields(t);
-                        } else if (cmd.equals("threads")) {
-                            evaluator.commandThreads(t);
-                        } else if (cmd.equals("thread")) {
-                            evaluator.commandThread(t);
-                        } else if (cmd.equals("suspend")) {
-                            evaluator.commandSuspend(t);
-                        } else if (cmd.equals("resume")) {
-                            evaluator.commandResume(t);
-                        } else if (cmd.equals("cont")) {
-                            MessageOutput.printPrompt(true);
-                            showPrompt = false;
-                            evaluator.commandCont();
-                        } else if (cmd.equals("threadgroups")) {
-                            evaluator.commandThreadGroups();
-                        } else if (cmd.equals("threadgroup")) {
-                            evaluator.commandThreadGroup(t);
-                        } else if (cmd.equals("catch")) {
-                            evaluator.commandCatchException(t);
-                        } else if (cmd.equals("ignore")) {
-                            evaluator.commandIgnoreException(t);
-                        } else if (cmd.equals("step")) {
-                            MessageOutput.printPrompt(true);
-                            showPrompt = false;
-                            evaluator.commandStep(t);
-                        } else if (cmd.equals("stepi")) {
-                            MessageOutput.printPrompt(true);
-                            showPrompt = false;
-                            evaluator.commandStepi();
-                        } else if (cmd.equals("next")) {
-                            MessageOutput.printPrompt(true);
-                            showPrompt = false;
-                            evaluator.commandNext();
-                        } else if (cmd.equals("kill")) {
-                            showPrompt = false;        // asynchronous command
-                            evaluator.commandKill(t);
-                        } else if (cmd.equals("interrupt")) {
-                            evaluator.commandInterrupt(t);
-                        } else if (cmd.equals("trace")) {
-                            evaluator.commandTrace(t);
-                        } else if (cmd.equals("untrace")) {
-                            evaluator.commandUntrace(t);
-                        } else if (cmd.equals("where")) {
-                            evaluator.commandWhere(t, false);
-                        } else if (cmd.equals("wherei")) {
-                            evaluator.commandWhere(t, true);
-                        } else if (cmd.equals("up")) {
-                            evaluator.commandUp(t);
-                        } else if (cmd.equals("down")) {
-                            evaluator.commandDown(t);
-                        } else if (cmd.equals("load")) {
-                            evaluator.commandLoad(t);
-                        } else if (cmd.equals("run")) {
-                            evaluator.commandRun(t);
-                            /*
-                             * Fire up an event handler, if the connection was just
-                             * opened. Since this was done from the run command
-                             * we don't stop the VM on its VM start event (so
-                             * arg 2 is false).
-                             */
-                            if ((handler == null) && Env.connection().isOpen()) {
-                                handler = new EventHandler(this, false);
-                            }
-                        } else if (cmd.equals("memory")) {
-                            evaluator.commandMemory();
-                        } else if (cmd.equals("gc")) {
-                            evaluator.commandGC();
-                        } else if (cmd.equals("stop")) {
-                            evaluator.commandStop(t);
-                        } else if (cmd.equals("clear")) {
-                            evaluator.commandClear(t);
-                        } else if (cmd.equals("watch")) {
-                            evaluator.commandWatch(t);
-                        } else if (cmd.equals("unwatch")) {
-                            evaluator.commandUnwatch(t);
-                        } else if (cmd.equals("list")) {
-                            evaluator.commandList(t);
-                        } else if (cmd.equals("lines")) { // Undocumented command: useful for testing.
-                            evaluator.commandLines(t);
-                        } else if (cmd.equals("classpath")) {
-                            evaluator.commandClasspath(t);
-                        } else if (cmd.equals("use") || cmd.equals("sourcepath")) {
-                            evaluator.commandUse(t);
-                        } else if (cmd.equals("monitor")) {
-                            monitorCommand(t);
-                        } else if (cmd.equals("unmonitor")) {
-                            unmonitorCommand(t);
-                        } else if (cmd.equals("lock")) {
-                            evaluator.commandLock(t);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("threadlocks")) {
-                            evaluator.commandThreadlocks(t);
-                        } else if (cmd.equals("disablegc")) {
-                            evaluator.commandDisableGC(t);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("enablegc")) {
-                            evaluator.commandEnableGC(t);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("save")) { // Undocumented command: useful for testing.
-                            evaluator.commandSave(t);
-                            showPrompt = false;        // asynchronous command
-                        } else if (cmd.equals("bytecodes")) { // Undocumented command: useful for testing.
-                            evaluator.commandBytecodes(t);
-                        } else if (cmd.equals("redefine")) {
-                            evaluator.commandRedefine(t);
-                        } else if (cmd.equals("pop")) {
-                            evaluator.commandPopFrames(t, false);
-                        } else if (cmd.equals("reenter")) {
-                            evaluator.commandPopFrames(t, true);
-                        } else if (cmd.equals("extension")) {
-                            evaluator.commandExtension(t);
-                        } else if (cmd.equals("exclude")) {
-                            evaluator.commandExclude(t);
-                        } else if (cmd.equals("read")) {
-                            readCommand(t);
-                        } else if (cmd.equals("dbgtrace")) {
-                            evaluator.commandDbgTrace(t);
-                        } else if (cmd.equals("help") || cmd.equals("?")) {
-                            help();
-                        } else if (cmd.equals("version")) {
-                            evaluator.commandVersion(progname,
-                                                     Bootstrap.virtualMachineManager());
-                        } else if (cmd.equals("quit") || cmd.equals("exit")) {
-                            if (handler != null) {
-                                handler.shutdown();
-                            }
-                            Env.shutdown();
-                        } else {
-                            MessageOutput.println("Unrecognized command.  Try help...", cmd);
-                        }
-                    } catch (VMCannotBeModifiedException rovm) {
-                        MessageOutput.println("Command is not supported on a read-only VM connection", cmd);
-                    } catch (UnsupportedOperationException uoe) {
-                        MessageOutput.println("Command is not supported on the target VM", cmd);
-                    } catch (VMNotConnectedException vmnse) {
+                name = t.nextToken().toLowerCase();
+            }
+            if (valid) {
+                int commandNumber = isCommand(name);
+                String argsLine = t.hasMoreTokens() ? t.nextToken("") : "";
+                for (int r = 0; r < reps; r += 1) {
+                    /*
+                     * Check for an unknown command
+                     */
+                    if (commandNumber < 0) {
+                        MessageOutput.println("Unrecognized command.  Try help...", name);
+                    } else if (!Env.connection().isOpen() && !isDisconnectCmd(commandNumber)) {
                         MessageOutput.println("Command not valid until the VM is started with the run command",
-                                              cmd);
-                    } catch (Exception e) {
-                        MessageOutput.printException("Internal exception:", e);
+                                              name);
+                    } else if (Env.connection().isOpen() && !Env.vm().canBeModified() &&
+                               !isReadOnlyCmd(commandNumber)) {
+                        MessageOutput.println("Command is not supported on a read-only VM connection",
+                                              name);
+                    } else {
+                        Commands evaluator = new Commands();
+                        var args = new StringTokenizer(argsLine);
+                        try {
+                            if (name.equals("print")) {
+                                evaluator.commandPrint(args, false);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("eval")) {
+                                evaluator.commandPrint(args, false);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("set")) {
+                                evaluator.commandSet(args);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("dump")) {
+                                evaluator.commandPrint(args, true);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("locals")) {
+                                evaluator.commandLocals();
+                            } else if (name.equals("classes")) {
+                                evaluator.commandClasses();
+                            } else if (name.equals("class")) {
+                                evaluator.commandClass(args);
+                            } else if (name.equals("connectors")) {
+                                evaluator.commandConnectors(Bootstrap.virtualMachineManager());
+                            } else if (name.equals("methods")) {
+                                evaluator.commandMethods(args);
+                            } else if (name.equals("fields")) {
+                                evaluator.commandFields(args);
+                            } else if (name.equals("threads")) {
+                                evaluator.commandThreads(args);
+                            } else if (name.equals("thread")) {
+                                evaluator.commandThread(args);
+                            } else if (name.equals("suspend")) {
+                                evaluator.commandSuspend(args);
+                            } else if (name.equals("resume")) {
+                                evaluator.commandResume(args);
+                            } else if (name.equals("cont")) {
+                                MessageOutput.printPrompt(true);
+                                showPrompt = false;
+                                evaluator.commandCont();
+                            } else if (name.equals("threadgroups")) {
+                                evaluator.commandThreadGroups();
+                            } else if (name.equals("threadgroup")) {
+                                evaluator.commandThreadGroup(args);
+                            } else if (name.equals("catch")) {
+                                evaluator.commandCatchException(args);
+                            } else if (name.equals("ignore")) {
+                                evaluator.commandIgnoreException(args);
+                            } else if (name.equals("step")) {
+                                MessageOutput.printPrompt(true);
+                                showPrompt = false;
+                                evaluator.commandStep(args);
+                            } else if (name.equals("stepi")) {
+                                MessageOutput.printPrompt(true);
+                                showPrompt = false;
+                                evaluator.commandStepi();
+                            } else if (name.equals("next")) {
+                                MessageOutput.printPrompt(true);
+                                showPrompt = false;
+                                evaluator.commandNext();
+                            } else if (name.equals("kill")) {
+                                showPrompt = false;        // asynchronous command
+                                evaluator.commandKill(args);
+                            } else if (name.equals("interrupt")) {
+                                evaluator.commandInterrupt(args);
+                            } else if (name.equals("trace")) {
+                                evaluator.commandTrace(args);
+                            } else if (name.equals("untrace")) {
+                                evaluator.commandUntrace(args);
+                            } else if (name.equals("where")) {
+                                evaluator.commandWhere(args, false);
+                            } else if (name.equals("wherei")) {
+                                evaluator.commandWhere(args, true);
+                            } else if (name.equals("up")) {
+                                evaluator.commandUp(args);
+                            } else if (name.equals("down")) {
+                                evaluator.commandDown(args);
+                            } else if (name.equals("load")) {
+                                evaluator.commandLoad(args);
+                            } else if (name.equals("run")) {
+                                evaluator.commandRun(args);
+                                /*
+                                 * Fire up an event handler, if the connection was just
+                                 * opened. Since this was done from the run command
+                                 * we don't stop the VM on its VM start event (so
+                                 * arg 2 is false).
+                                 */
+                                if ((handler == null) && Env.connection().isOpen()) {
+                                    handler = new EventHandler(this, false);
+                                }
+                            } else if (name.equals("memory")) {
+                                evaluator.commandMemory();
+                            } else if (name.equals("gc")) {
+                                evaluator.commandGC();
+                            } else if (name.equals("stop")) {
+                                evaluator.commandStop(args);
+                            } else if (name.equals("clear")) {
+                                evaluator.commandClear(args);
+                            } else if (name.equals("watch")) {
+                                evaluator.commandWatch(args);
+                            } else if (name.equals("unwatch")) {
+                                evaluator.commandUnwatch(args);
+                            } else if (name.equals("list")) {
+                                nextListTarget = evaluator.commandList(args, repeat ? nextListTarget : null);
+                            } else if (name.equals("lines")) { // Undocumented command: useful for testing.
+                                evaluator.commandLines(args);
+                            } else if (name.equals("classpath")) {
+                                evaluator.commandClasspath(args);
+                            } else if (name.equals("use") || name.equals("sourcepath")) {
+                                evaluator.commandUse(args);
+                            } else if (name.equals("monitor")) {
+                                monitorCommand(args);
+                            } else if (name.equals("unmonitor")) {
+                                unmonitorCommand(args);
+                            } else if (name.equals("lock")) {
+                                evaluator.commandLock(args);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("threadlocks")) {
+                                evaluator.commandThreadlocks(args);
+                            } else if (name.equals("disablegc")) {
+                                evaluator.commandDisableGC(args);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("enablegc")) {
+                                evaluator.commandEnableGC(args);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("save")) { // Undocumented command: useful for testing.
+                                evaluator.commandSave(args);
+                                showPrompt = false;        // asynchronous command
+                            } else if (name.equals("bytecodes")) { // Undocumented command: useful for testing.
+                                evaluator.commandBytecodes(args);
+                            } else if (name.equals("redefine")) {
+                                evaluator.commandRedefine(args);
+                            } else if (name.equals("pop")) {
+                                evaluator.commandPopFrames(args, false);
+                            } else if (name.equals("reenter")) {
+                                evaluator.commandPopFrames(args, true);
+                            } else if (name.equals("extension")) {
+                                evaluator.commandExtension(args);
+                            } else if (name.equals("exclude")) {
+                                evaluator.commandExclude(args);
+                            } else if (name.equals("read")) {
+                                readCommand(args);
+                            } else if (name.equals("dbgtrace")) {
+                                evaluator.commandDbgTrace(args);
+                            } else if (name.equals("help") || name.equals("?")) {
+                                help();
+                            } else if (name.equals("version")) {
+                                evaluator.commandVersion(progname,
+                                                         Bootstrap.virtualMachineManager());
+                            } else if (name.equals("repeat")) {
+                                doRepeat(args);
+                            } else if (name.equals("quit") || name.equals("exit")) {
+                                if (handler != null) {
+                                    handler.shutdown();
+                                }
+                                Env.shutdown();
+                            } else {
+                                MessageOutput.println("Unrecognized command.  Try help...", name);
+                            }
+                        } catch (VMCannotBeModifiedException rovm) {
+                            MessageOutput.println("Command is not supported on a read-only VM connection", name);
+                        } catch (UnsupportedOperationException uoe) {
+                            MessageOutput.println("Command is not supported on the target VM", name);
+                        } catch (VMNotConnectedException vmnse) {
+                            MessageOutput.println("Command not valid until the VM is started with the run command",
+                                                  name);
+                        } catch (Exception e) {
+                            MessageOutput.printException("Internal exception:", e);
+                        }
                     }
                 }
             }
@@ -620,6 +654,12 @@ public class TTY implements EventNotifier {
         if (showPrompt) {
             MessageOutput.printPrompt();
         }
+
+        if (LIST_RESET.contains(name)) {
+            nextListTarget = null;
+        }
+
+        return name;
     }
 
     /*
@@ -661,7 +701,6 @@ public class TTY implements EventNotifier {
         }
     }
 
-
     void readCommand(StringTokenizer t) {
         if (t.hasMoreTokens()) {
             String cmdfname = t.nextToken();
@@ -670,6 +709,19 @@ public class TTY implements EventNotifier {
             }
         } else {
             MessageOutput.println("Usage: read <command-filename>");
+        }
+    }
+
+    protected void doRepeat(StringTokenizer t) {
+        if (t.hasMoreTokens()) {
+            var choice = t.nextToken().toLowerCase();
+            if ((choice.equals("on") || choice.equals("off")) && !t.hasMoreTokens()) {
+                repeat = choice.equals("on");
+            } else {
+                MessageOutput.println("repeat usage");
+            }
+        } else {
+            MessageOutput.println(repeat ? "repeat is on" : "repeat is off");
         }
     }
 
@@ -749,8 +801,6 @@ public class TTY implements EventNotifier {
             BufferedReader in =
                     new BufferedReader(new InputStreamReader(System.in));
 
-            String lastLine = null;
-
             Thread.currentThread().setPriority(Thread.NORM_PRIORITY);
 
             /*
@@ -788,6 +838,9 @@ public class TTY implements EventNotifier {
 
             // Process interactive commands.
             MessageOutput.printPrompt();
+
+            String lastLine = null;
+            String lastCommandName = null;
             while (true) {
                 String ln = in.readLine();
                 if (ln == null) {
@@ -809,7 +862,9 @@ public class TTY implements EventNotifier {
                 StringTokenizer t = new StringTokenizer(ln);
                 if (t.hasMoreTokens()) {
                     lastLine = ln;
-                    executeCommand(t);
+                    lastCommandName = executeCommand(t);
+                } else if (repeat && lastLine != null && REPEATABLE.contains(lastCommandName)) {
+                    executeCommand(new StringTokenizer(lastLine));
                 } else {
                     MessageOutput.printPrompt();
                 }
