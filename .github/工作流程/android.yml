@@ -1,0 +1,49 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: set up JDK 11
+      uses: actions/setup-java@v2
+      with:
+        java-version: '11'
+        distribution: 'adopt'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+    - name: Build with Gradle
+      run: ./gradlew build
+- 名称：设置 Node.js 环境
+  用途：actions/setup-node@v2.4.0
+  和：
+    # 在 npmrc 中设置 always-auth
+    always-auth: # 可选，默认为 false
+    # 要使用的版本的版本规范。示例：12.x、10.15.1、>=10.15.0
+    节点版本：# 可选
+    # Node 使用的目标架构。示例：x86、x64。默认使用系统架构。
+    架构：# 可选
+    # 如果您希望操作检查满足版本规范的最新可用版本，请设置此选项
+    检查最新：# 可选
+    # 用于设置身份验证的可选注册表。将在项目级别的 .npmrc 和 .yarnrc 文件中设置注册表，并设置 auth 以从 env.NODE_AUTH_TOKEN 中读取
+    注册表网址：# 可选
+    # 可选范围，用于针对范围注册表进行身份验证
+    范围：# 可选
+    # 用于从节点版本中提取节点分布。由于有一个默认值，这通常不是由用户提供的。
+    token: # 可选，默认为 ${{ github.token }}
+    # 用于指定在默认目录中缓存的包管理器。支持的值：npm、yarn、pnpm
+    缓存：# 可选
+    # 用于指定依赖文件的路径：package-lock.json、yarn.lock等。支持通配符或文件名列表缓存多个依赖。
+    缓存依赖路径：# 可选
+    # 已弃用。请改用节点版本。2019 年 10 月 1 日之后将不再受支持
+    版本：# 可选
